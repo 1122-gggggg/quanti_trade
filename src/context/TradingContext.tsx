@@ -1,5 +1,16 @@
 import React, { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
-import type { Asset, Candle, Order, Portfolio, IndicatorConfig, PriceAlert, ChartType, DrawingTool, DrawingElement } from '../types/trading';
+import type {
+  Asset,
+  Candle,
+  Order,
+  Portfolio,
+  IndicatorConfig,
+  PriceAlert,
+  ChartType,
+  DrawingTool,
+  DrawingElement,
+  Timeframe,
+} from '../types/trading';
 import { INITIAL_ASSETS } from '../data/assets';
 import { generateHistoricalCandles, generateNextTick } from '../data/sampleDataGenerator';
 import confetti from 'canvas-confetti';
@@ -8,8 +19,8 @@ interface TradingContextType {
   assets: Asset[];
   activeAsset: Asset;
   setActiveAsset: (asset: Asset) => void;
-  timeframe: '1m' | '5m' | '15m' | '1h' | '4h' | '1D';
-  setTimeframe: (tf: '1m' | '5m' | '15m' | '1h' | '4h' | '1D') => void;
+  timeframe: Timeframe;
+  setTimeframe: (tf: Timeframe) => void;
   candles: Candle[];
   setCandles: (candles: Candle[]) => void;
   watchlist: string[];
@@ -19,9 +30,9 @@ interface TradingContextType {
   indicators: IndicatorConfig[];
   toggleIndicator: (id: string) => void;
   placeOrder: (
-    symbol: string, 
-    side: 'buy' | 'sell', 
-    amount: number, 
+    symbol: string,
+    side: 'buy' | 'sell',
+    amount: number,
     price?: number,
     leverage?: number,
     takeProfit?: number,
@@ -64,10 +75,9 @@ export const TradingProvider: React.FC<{ children: ReactNode }> = ({ children })
   });
 
   const [activeAsset, setActiveAsset] = useState<Asset>(assets[0]);
-  const [timeframe, setTimeframe] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1D'>('1h');
+  const [timeframe, setTimeframe] = useState<Timeframe>('1h');
   const [candles, setCandles] = useState<Candle[]>([]);
   const [watchlist, setWatchlist] = useState<string[]>(['BTC/USD', 'NVDA', '2330.TW', 'XAU/USD']);
-  
   const [indicators, setIndicators] = useState<IndicatorConfig[]>(DEFAULT_INDICATORS);
   const [theme, setTheme] = useState<'dark' | 'light' | 'terminal'>('dark');
   const [volatility, setVolatility] = useState<number>(1.0);
@@ -81,164 +91,243 @@ export const TradingProvider: React.FC<{ children: ReactNode }> = ({ children })
     const saved = localStorage.getItem('apex_portfolio');
     if (saved) return JSON.parse(saved);
     return {
-      cashBalance: 100000.00,
-      initialBalance: 100000.00,
+      cashBalance: 100000.0,
+      initialBalance: 100000.0,
       realizedPnL: 0,
       positions: [],
-      history: [{ timestamp: Date.now(), equity: 100000.00 }],
+      history: [{ timestamp: Date.now(), equity: 100000.0 }],
     };
   });
 
   const [orders, setOrders] = useState<Order[]>([]);
 
-  // Load candles whenever active asset or timeframe changes
   useEffect(() => {
-    const newCandles = generateHistoricalCandles(activeAsset.price, 150, timeframe);
+    localStorage.setItem('apex_assets', JSON.stringify(assets));
+  }, [assets]);
+
+  useEffect(() => {
+    localStorage.setItem('apex_portfolio', JSON.stringify(portfolio));
+  }, [portfolio]);
+
+  useEffect(() => {
+    const latest = assets.find(asset => asset.symbol === activeAsset.symbol);
+    if (!latest) return;
+
+    setActiveAsset(current => {
+      if (
+        current.price === latest.price &&
+        current.change24h === latest.change24h &&
+        current.high24h === latest.high24h &&
+        current.low24h === latest.low24h
+      ) {
+        return current;
+      }
+      return latest;
+    });
+  }, [assets, activeAsset.symbol]);
+
+  useEffect(() => {
+    const newCandles = generateHistoricalCandles(activeAsset.price, 500, timeframe);
     setCandles(newCandles);
   }, [activeAsset.symbol, timeframe]);
 
-  // Real-time Binance WebSocket Integration for Crypto
   useEffect(() => {
     if (dataFeedMode !== 'binance_live') return;
 
-    const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@ticker/ethusdt@ticker/solusdt@ticker');
+    let socket: WebSocket | null = null;
+    let retryTimer: number | undefined;
+    let retryAttempt = 0;
+    let disposed = false;
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data && data.s && data.c) {
-        const symbolMap: Record<string, string> = {
-          'BTCUSDT': 'BTC/USD',
-          'ETHUSDT': 'ETH/USD',
-          'SOLUSDT': 'SOL/USD',
-        };
-        const mappedSymbol = symbolMap[data.s];
-        if (mappedSymbol) {
-          const livePrice = parseFloat(data.c);
-          const liveChange = parseFloat(data.P);
-          const liveHigh = parseFloat(data.h);
-          const liveLow = parseFloat(data.l);
+    const connect = () => {
+      socket = new WebSocket(
+        'wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/ethusdt@ticker/solusdt@ticker'
+      );
 
-          setAssets(prev => prev.map(a => 
-            a.symbol === mappedSymbol 
-              ? { ...a, price: livePrice, change24h: liveChange, high24h: liveHigh, low24h: liveLow }
-              : a
+      socket.onopen = () => {
+        retryAttempt = 0;
+      };
+
+      socket.onmessage = event => {
+        try {
+          const parsed = JSON.parse(event.data);
+          const data = parsed.data ?? parsed;
+          if (!data?.s || !data?.c) return;
+
+          const symbolMap: Record<string, string> = {
+            BTCUSDT: 'BTC/USD',
+            ETHUSDT: 'ETH/USD',
+            SOLUSDT: 'SOL/USD',
+          };
+          const mappedSymbol = symbolMap[data.s];
+          if (!mappedSymbol) return;
+
+          const livePrice = Number.parseFloat(data.c);
+          const liveChange = Number.parseFloat(data.P);
+          const liveHigh = Number.parseFloat(data.h);
+          const liveLow = Number.parseFloat(data.l);
+          const liveVolume = Number.parseFloat(data.q ?? data.v ?? '0');
+
+          if (![livePrice, liveChange, liveHigh, liveLow].every(Number.isFinite)) return;
+
+          setAssets(previous => previous.map(asset =>
+            asset.symbol === mappedSymbol
+              ? {
+                  ...asset,
+                  price: livePrice,
+                  change24h: liveChange,
+                  high24h: liveHigh,
+                  low24h: liveLow,
+                  volume24h: Number.isFinite(liveVolume) ? liveVolume : asset.volume24h,
+                }
+              : asset
           ));
+        } catch {
+          // Ignore malformed provider frames and wait for the next message.
         }
-      }
+      };
+
+      socket.onerror = () => {
+        socket?.close();
+      };
+
+      socket.onclose = () => {
+        if (disposed) return;
+        const delay = Math.min(30_000, 1_000 * 2 ** retryAttempt);
+        retryAttempt += 1;
+        retryTimer = window.setTimeout(connect, delay);
+      };
     };
 
-    return () => ws.close();
+    connect();
+
+    return () => {
+      disposed = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      socket?.close();
+    };
   }, [dataFeedMode]);
 
-  // Simulated tick generator if simulated mode
   useEffect(() => {
     if (dataFeedMode !== 'simulated') return;
 
-    const interval = setInterval(() => {
-      setAssets(prevAssets => {
-        return prevAssets.map(asset => {
-          const changePct = (Math.random() - 0.495) * 0.003 * volatility;
-          const newPrice = Number((asset.price * (1 + changePct)).toFixed(asset.category === 'forex' ? 4 : 2));
-          const change24h = Number((asset.change24h + (changePct * 10)).toFixed(2));
-          
-          return {
-            ...asset,
-            price: newPrice,
-            change24h,
-            high24h: Math.max(asset.high24h, newPrice),
-            low24h: Math.min(asset.low24h, newPrice),
-          };
-        });
+    const interval = window.setInterval(() => {
+      setAssets(previousAssets => previousAssets.map(asset => {
+        const changePct = (Math.random() - 0.495) * 0.003 * volatility;
+        const decimals = asset.category === 'forex' ? 5 : 2;
+        const newPrice = Number((asset.price * (1 + changePct)).toFixed(decimals));
+        const change24h = Number((asset.change24h + changePct * 10).toFixed(2));
+
+        return {
+          ...asset,
+          price: newPrice,
+          change24h,
+          high24h: Math.max(asset.high24h, newPrice),
+          low24h: Math.min(asset.low24h, newPrice),
+        };
+      }));
+
+      setCandles(previousCandles => {
+        if (previousCandles.length === 0) return previousCandles;
+        const last = previousCandles[previousCandles.length - 1];
+        const nextTick = generateNextTick(last, timeframe);
+
+        if (nextTick.time > last.time) {
+          return [...previousCandles, nextTick].slice(-2_000);
+        }
+        return [...previousCandles.slice(0, -1), nextTick];
       });
+    }, 1_500);
 
-      // Update active candles tick
-      setCandles(prevCandles => {
-        if (prevCandles.length === 0) return prevCandles;
-        const last = prevCandles[prevCandles.length - 1];
-        const nextTick = generateNextTick(last, 3600);
-        return [...prevCandles.slice(0, -1), nextTick];
-      });
-    }, 1500);
+    return () => window.clearInterval(interval);
+  }, [volatility, dataFeedMode, timeframe]);
 
-    return () => clearInterval(interval);
-  }, [volatility, dataFeedMode]);
-
-  // Position Stop Loss & Take Profit Auto Monitor
   useEffect(() => {
-    setPortfolio(prev => {
-      if (prev.positions.length === 0) return prev;
-      let totalUnrealized = 0;
-      let updatedPositions = [...prev.positions];
+    setPortfolio(previous => {
+      if (previous.positions.length === 0) return previous;
+
       let closedPositionsPnL = 0;
       let returnedCash = 0;
 
-      updatedPositions = updatedPositions.filter(pos => {
-        const currAsset = assets.find(a => a.symbol === pos.symbol);
-        const currentPrice = currAsset ? currAsset.price : pos.currentPrice;
+      const updatedPositions = previous.positions.filter(position => {
+        const currentAsset = assets.find(asset => asset.symbol === position.symbol);
+        const currentPrice = currentAsset ? currentAsset.price : position.currentPrice;
+        const triggerStopLoss = Boolean(
+          position.stopLoss &&
+          (position.side === 'buy' ? currentPrice <= position.stopLoss : currentPrice >= position.stopLoss)
+        );
+        const triggerTakeProfit = Boolean(
+          position.takeProfit &&
+          (position.side === 'buy' ? currentPrice >= position.takeProfit : currentPrice <= position.takeProfit)
+        );
+        const pnl = position.side === 'buy'
+          ? (currentPrice - position.entryPrice) * position.amount
+          : (position.entryPrice - currentPrice) * position.amount;
+        const initialMargin = (position.amount * position.entryPrice) / position.leverage;
 
-        // Auto trigger TP/SL
-        let triggerSL = pos.stopLoss && (pos.side === 'buy' ? currentPrice <= pos.stopLoss : currentPrice >= pos.stopLoss);
-        let triggerTP = pos.takeProfit && (pos.side === 'buy' ? currentPrice >= pos.takeProfit : currentPrice <= pos.takeProfit);
-
-        if (triggerSL || triggerTP) {
-          const pnl = pos.side === 'buy'
-            ? (currentPrice - pos.entryPrice) * pos.amount * pos.leverage
-            : (pos.entryPrice - currentPrice) * pos.amount * pos.leverage;
-          
+        if (triggerStopLoss || triggerTakeProfit) {
           closedPositionsPnL += pnl;
-          returnedCash += (pos.amount * pos.entryPrice) + pnl;
-          return false; // Close position
+          returnedCash += initialMargin + pnl;
+          return false;
         }
 
-        let pnl = pos.side === 'buy'
-          ? (currentPrice - pos.entryPrice) * pos.amount * pos.leverage
-          : (pos.entryPrice - currentPrice) * pos.amount * pos.leverage;
-
-        const pnlPercent = (pnl / (pos.entryPrice * pos.amount)) * 100;
-        totalUnrealized += pnl;
-
-        pos.currentPrice = currentPrice;
-        pos.unrealizedPnL = Number(pnl.toFixed(2));
-        pos.unrealizedPnLPercent = Number(pnlPercent.toFixed(2));
+        position.currentPrice = currentPrice;
+        position.unrealizedPnL = Number(pnl.toFixed(2));
+        position.unrealizedPnLPercent = initialMargin > 0
+          ? Number(((pnl / initialMargin) * 100).toFixed(2))
+          : 0;
         return true;
       });
 
       return {
-        ...prev,
-        cashBalance: Number((prev.cashBalance + returnedCash).toFixed(2)),
-        realizedPnL: Number((prev.realizedPnL + closedPositionsPnL).toFixed(2)),
+        ...previous,
+        cashBalance: Number((previous.cashBalance + returnedCash).toFixed(2)),
+        realizedPnL: Number((previous.realizedPnL + closedPositionsPnL).toFixed(2)),
         positions: updatedPositions,
       };
     });
   }, [assets]);
 
+  useEffect(() => {
+    setPriceAlerts(previous => previous.map(alertItem => {
+      if (alertItem.triggered) return alertItem;
+      const asset = assets.find(item => item.symbol === alertItem.symbol);
+      if (!asset) return alertItem;
+      const triggered = alertItem.condition === 'above'
+        ? asset.price >= alertItem.targetPrice
+        : asset.price <= alertItem.targetPrice;
+      return triggered ? { ...alertItem, triggered: true } : alertItem;
+    }));
+  }, [assets]);
+
   const toggleWatchlist = (symbol: string) => {
-    setWatchlist(prev =>
-      prev.includes(symbol) ? prev.filter(s => s !== symbol) : [...prev, symbol]
+    setWatchlist(previous =>
+      previous.includes(symbol) ? previous.filter(item => item !== symbol) : [...previous, symbol]
     );
   };
 
   const toggleIndicator = (id: string) => {
-    setIndicators(prev =>
-      prev.map(ind => ind.id === id ? { ...ind, enabled: !ind.enabled } : ind)
+    setIndicators(previous =>
+      previous.map(indicator => indicator.id === id ? { ...indicator, enabled: !indicator.enabled } : indicator)
     );
   };
 
   const placeOrder = (
-    symbol: string, 
-    side: 'buy' | 'sell', 
-    amount: number, 
+    symbol: string,
+    side: 'buy' | 'sell',
+    amount: number,
     price?: number,
     leverage: number = 1,
     takeProfit?: number,
     stopLoss?: number
   ): boolean => {
-    const targetAsset = assets.find(a => a.symbol === symbol) || activeAsset;
+    const targetAsset = assets.find(asset => asset.symbol === symbol) || activeAsset;
     const executionPrice = price || targetAsset.price;
-    const totalCost = (amount * executionPrice) / leverage;
+    const safeLeverage = Math.max(1, leverage);
+    const initialMargin = (amount * executionPrice) / safeLeverage;
 
-    if (side === 'buy' && portfolio.cashBalance < totalCost) {
-      alert('Insufficient Funds for leveraged order!');
+    if (!Number.isFinite(amount) || amount <= 0 || portfolio.cashBalance < initialMargin) {
+      alert('Invalid quantity or insufficient margin.');
       return false;
     }
 
@@ -249,67 +338,65 @@ export const TradingProvider: React.FC<{ children: ReactNode }> = ({ children })
       type: 'market',
       amount,
       price: executionPrice,
-      total: totalCost,
+      total: initialMargin,
       status: 'executed',
       timestamp: Date.now(),
-      leverage,
+      leverage: safeLeverage,
       takeProfit,
       stopLoss,
     };
 
-    setOrders(prev => [newOrder, ...prev]);
-
-    setPortfolio(prev => {
-      let updatedPositions = [...prev.positions];
-      let newCash = prev.cashBalance - totalCost;
-
-      updatedPositions.push({
-        id: `pos-${Date.now()}`,
-        symbol,
-        side,
-        amount,
-        entryPrice: executionPrice,
-        currentPrice: executionPrice,
-        unrealizedPnL: 0,
-        unrealizedPnLPercent: 0,
-        leverage,
-        openedAt: Date.now(),
-        takeProfit,
-        stopLoss,
-      });
-
-      return {
-        ...prev,
-        cashBalance: Number(newCash.toFixed(2)),
-        positions: updatedPositions,
-      };
-    });
+    setOrders(previous => [newOrder, ...previous]);
+    setPortfolio(previous => ({
+      ...previous,
+      cashBalance: Number((previous.cashBalance - initialMargin).toFixed(2)),
+      positions: [
+        ...previous.positions,
+        {
+          id: `pos-${Date.now()}`,
+          symbol,
+          side,
+          amount,
+          entryPrice: executionPrice,
+          currentPrice: executionPrice,
+          liquidationPrice: side === 'buy'
+            ? executionPrice * (1 - 1 / safeLeverage)
+            : executionPrice * (1 + 1 / safeLeverage),
+          unrealizedPnL: 0,
+          unrealizedPnLPercent: 0,
+          leverage: safeLeverage,
+          openedAt: Date.now(),
+          takeProfit,
+          stopLoss,
+        },
+      ],
+    }));
 
     confetti({ particleCount: 50, spread: 70, origin: { y: 0.8 } });
     return true;
   };
 
   const closePosition = (positionId: string) => {
-    setPortfolio(prev => {
-      const pos = prev.positions.find(p => p.id === positionId);
-      if (!pos) return prev;
+    setPortfolio(previous => {
+      const position = previous.positions.find(item => item.id === positionId);
+      if (!position) return previous;
 
-      const currAsset = assets.find(a => a.symbol === pos.symbol);
-      const closePrice = currAsset ? currAsset.price : pos.currentPrice;
-      const initialMargin = (pos.amount * pos.entryPrice) / pos.leverage;
-      const pnl = pos.side === 'buy'
-        ? (closePrice - pos.entryPrice) * pos.amount * pos.leverage
-        : (pos.entryPrice - closePrice) * pos.amount * pos.leverage;
+      const currentAsset = assets.find(asset => asset.symbol === position.symbol);
+      const closePrice = currentAsset ? currentAsset.price : position.currentPrice;
+      const initialMargin = (position.amount * position.entryPrice) / position.leverage;
+      const pnl = position.side === 'buy'
+        ? (closePrice - position.entryPrice) * position.amount
+        : (position.entryPrice - closePrice) * position.amount;
 
       if (pnl > 0) {
         confetti({ particleCount: 80, spread: 80, origin: { y: 0.6 } });
       }
 
       return {
-        ...prev,
-        cashBalance: Number((prev.cashBalance + initialMargin + pnl).toFixed(2)),
-        realizedPnL: Number((prev.realizedPnL + pnl).toFixed(2)),
-        positions: prev.positions.filter(p => p.id !== positionId),
+        ...previous,
+        cashBalance: Number((previous.cashBalance + initialMargin + pnl).toFixed(2)),
+        realizedPnL: Number((previous.realizedPnL + pnl).toFixed(2)),
+        positions: previous.positions.filter(item => item.id !== positionId),
       };
     });
   };
@@ -323,11 +410,11 @@ export const TradingProvider: React.FC<{ children: ReactNode }> = ({ children })
       triggered: false,
       createdAt: Date.now(),
     };
-    setPriceAlerts(prev => [...prev, alertItem]);
+    setPriceAlerts(previous => [...previous, alertItem]);
   };
 
   const removePriceAlert = (id: string) => {
-    setPriceAlerts(prev => prev.filter(a => a.id !== id));
+    setPriceAlerts(previous => previous.filter(alertItem => alertItem.id !== id));
   };
 
   const clearDrawings = () => {
@@ -336,11 +423,11 @@ export const TradingProvider: React.FC<{ children: ReactNode }> = ({ children })
 
   const resetPortfolio = () => {
     setPortfolio({
-      cashBalance: 100000.00,
-      initialBalance: 100000.00,
+      cashBalance: 100000.0,
+      initialBalance: 100000.0,
       realizedPnL: 0,
       positions: [],
-      history: [{ timestamp: Date.now(), equity: 100000.00 }],
+      history: [{ timestamp: Date.now(), equity: 100000.0 }],
     });
     setOrders([]);
   };
