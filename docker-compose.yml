@@ -1,11 +1,165 @@
-version: '3.8'
-
 services:
-  apextrade-studio:
+  db:
+    image: timescale/timescaledb:latest-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-apextrade}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-postgres}
+      POSTGREST_DB_PASSWORD: ${POSTGREST_DB_PASSWORD:-apextrade-postgrest-dev}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-apextrade}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [backend]
+
+  postgrest:
+    image: postgrest/postgrest:v14.1
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGREST_DB_PASSWORD:-apextrade-postgrest-dev}@db:5432/${POSTGRES_DB:-apextrade}
+      PGRST_DB_SCHEMAS: app
+      PGRST_DB_ANON_ROLE: api_service
+      PGRST_SERVER_PORT: 3000
+      PGRST_DB_MAX_ROWS: 1000000
+      PGRST_DB_CHANNEL_ENABLED: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-change-me-redis}"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-change-me-redis} ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [backend]
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-apextrade}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio-secret}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [backend]
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-apextrade}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio-secret}
+      S3_BUCKET: ${S3_BUCKET:-apextrade-data}
+    entrypoint: >-
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+      mc mb --ignore-existing local/$$S3_BUCKET;
+      mc anonymous set none local/$$S3_BUCKET;
+      "
+    networks: [backend]
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: 8787
+      POSTGREST_URL: http://postgrest:3000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+      JOB_QUEUE_NAME: apextrade:jobs
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-apextrade}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-me-minio-secret}
+      S3_BUCKET: ${S3_BUCKET:-apextrade-data}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-2592000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+    depends_on:
+      postgrest:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "8787:8787"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8787/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [backend, frontend]
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/worker.Dockerfile
+    restart: unless-stopped
+    environment:
+      POSTGREST_URL: http://postgrest:3000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+      JOB_QUEUE_NAME: apextrade:jobs
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-apextrade}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-me-minio-secret}
+      S3_BUCKET: ${S3_BUCKET:-apextrade-data}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+    depends_on:
+      postgrest:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: [backend]
+
+  web:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
       - "8080:80"
-    restart: always
-    container_name: apextrade-studio
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [frontend]
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+
+networks:
+  backend:
+    internal: true
+  frontend:
