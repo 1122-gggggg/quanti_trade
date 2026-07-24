@@ -27,7 +27,7 @@ jobs:
           base64 -d /tmp/epic2.bundle.b64 > /tmp/epic2.tgz
           echo "e0e09ad0f392266a0d1f1d758a8d67b2d4d69d076df29b31045928a1c87b3537  /tmp/epic2.tgz" | sha256sum -c -
           tar -xzf /tmp/epic2.tgz
-          rm -f tools/epic2.bundle.b64 tools/epic2.bundle.part-* .github/workflows/epic2-bootstrap.yml
+          rm -f tools/epic2.bundle.b64 tools/epic2.bundle.part-*
           rmdir tools 2>/dev/null || true
 
       - name: Setup Node.js
@@ -80,10 +80,11 @@ jobs:
         if: always()
         run: docker compose down -v --remove-orphans
 
-      - name: Commit platform
+      - name: Commit platform source
         shell: bash
         run: |
           set -euo pipefail
+          git checkout HEAD -- .github/workflows/ci.yml .github/workflows/epic2-bootstrap.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
