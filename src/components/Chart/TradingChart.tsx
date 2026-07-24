@@ -1,24 +1,33 @@
 import React, { useEffect, useRef } from 'react';
-import { 
-  createChart, 
-  ColorType, 
-  CandlestickSeries, 
-  LineSeries, 
+import {
+  createChart,
+  ColorType,
+  CandlestickSeries,
+  BarSeries,
+  LineSeries,
   AreaSeries,
+  BaselineSeries,
   HistogramSeries,
-  type IChartApi, 
-  type CandlestickData, 
-  type LineData, 
+  type IChartApi,
+  type CandlestickData,
+  type BarData,
+  type LineData,
   type AreaData,
-  type HistogramData 
+  type BaselineData,
+  type HistogramData,
 } from 'lightweight-charts';
 import { useTrading } from '../../context/TradingContext';
-import { calculateSMA, calculateEMA, calculateBollingerBands, calculateVWAP } from '../../services/technicalIndicators';
+import {
+  calculateSMA,
+  calculateEMA,
+  calculateBollingerBands,
+  calculateVWAP,
+} from '../../services/technicalIndicators';
+import { normalizeChartCandles, toHeikinAshi } from '../../services/chartTransforms';
 
 export const TradingChart: React.FC = () => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-
   const { candles, indicators, activeAsset, theme, chartType } = useTrading();
 
   useEffect(() => {
@@ -26,17 +35,22 @@ export const TradingChart: React.FC = () => {
 
     const isTerminal = theme === 'terminal';
     const isLight = theme === 'light';
-
-    const bgColor = isTerminal ? '#000000' : isLight ? '#ffffff' : '#090d16';
+    const backgroundColor = isTerminal ? '#000000' : isLight ? '#ffffff' : '#090d16';
     const textColor = isTerminal ? '#00ff00' : isLight ? '#334155' : '#94a3b8';
     const gridColor = isTerminal ? '#003300' : isLight ? '#f1f5f9' : '#1e293b';
+    const upColor = isTerminal ? '#00ff00' : '#10b981';
+    const downColor = isTerminal ? '#ff0000' : '#f43f5e';
+    const normalizedCandles = normalizeChartCandles(candles);
+    const displayCandles = chartType === 'heikinAshi'
+      ? toHeikinAshi(normalizedCandles)
+      : normalizedCandles;
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
       height: 520,
       layout: {
-        background: { type: ColorType.Solid, color: bgColor },
-        textColor: textColor,
+        background: { type: ColorType.Solid, color: backgroundColor },
+        textColor,
         fontSize: 12,
         fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
       },
@@ -44,148 +58,170 @@ export const TradingChart: React.FC = () => {
         vertLines: { color: gridColor },
         horzLines: { color: gridColor },
       },
-      crosshair: {
-        mode: 1,
-      },
-      rightPriceScale: {
-        borderColor: gridColor,
-      },
+      crosshair: { mode: 1 },
+      rightPriceScale: { borderColor: gridColor },
       timeScale: {
         borderColor: gridColor,
         timeVisible: true,
-        secondsVisible: false,
+        secondsVisible: true,
       },
     });
 
     chartRef.current = chart;
 
-    // Series rendering based on chartType
     if (chartType === 'line') {
-      const lineSeries = chart.addSeries(LineSeries, {
+      const series = chart.addSeries(LineSeries, {
         color: '#06b6d4',
         lineWidth: 2,
       });
-      const lineData: LineData[] = candles.map(c => ({
-        time: c.time as any,
-        value: c.close,
+      const data: LineData[] = displayCandles.map(candle => ({
+        time: candle.time as never,
+        value: candle.close,
       }));
-      lineSeries.setData(lineData);
+      series.setData(data);
     } else if (chartType === 'area') {
-      const areaSeries = chart.addSeries(AreaSeries, {
+      const series = chart.addSeries(AreaSeries, {
         topColor: 'rgba(6, 182, 212, 0.4)',
         bottomColor: 'rgba(6, 182, 212, 0.0)',
         lineColor: '#06b6d4',
         lineWidth: 2,
       });
-      const areaData: AreaData[] = candles.map(c => ({
-        time: c.time as any,
-        value: c.close,
+      const data: AreaData[] = displayCandles.map(candle => ({
+        time: candle.time as never,
+        value: candle.close,
       }));
-      areaSeries.setData(areaData);
-    } else {
-      // Default: Candlesticks
-      const candlestickSeries = chart.addSeries(CandlestickSeries, {
-        upColor: isTerminal ? '#00ff00' : '#10b981',
-        downColor: isTerminal ? '#ff0000' : '#f43f5e',
-        borderVisible: false,
-        wickUpColor: isTerminal ? '#00ff00' : '#10b981',
-        wickDownColor: isTerminal ? '#ff0000' : '#f43f5e',
+      series.setData(data);
+    } else if (chartType === 'baseline') {
+      const basePrice = displayCandles[0]?.close ?? 0;
+      const series = chart.addSeries(BaselineSeries, {
+        baseValue: { type: 'price', price: basePrice },
+        topLineColor: upColor,
+        topFillColor1: 'rgba(16, 185, 129, 0.35)',
+        topFillColor2: 'rgba(16, 185, 129, 0.05)',
+        bottomLineColor: downColor,
+        bottomFillColor1: 'rgba(244, 63, 94, 0.05)',
+        bottomFillColor2: 'rgba(244, 63, 94, 0.35)',
       });
-
-      const candleData: CandlestickData[] = candles.map(c => ({
-        time: c.time as any,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
+      const data: BaselineData[] = displayCandles.map(candle => ({
+        time: candle.time as never,
+        value: candle.close,
       }));
-
-      candlestickSeries.setData(candleData);
+      series.setData(data);
+    } else if (chartType === 'bar') {
+      const series = chart.addSeries(BarSeries, {
+        upColor,
+        downColor,
+        openVisible: true,
+        thinBars: false,
+      });
+      const data: BarData[] = displayCandles.map(candle => ({
+        time: candle.time as never,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+      }));
+      series.setData(data);
+    } else {
+      const isHollow = chartType === 'hollowCandles';
+      const series = chart.addSeries(CandlestickSeries, {
+        upColor: isHollow ? backgroundColor : upColor,
+        downColor,
+        borderVisible: isHollow,
+        borderUpColor: upColor,
+        borderDownColor: downColor,
+        wickUpColor: upColor,
+        wickDownColor: downColor,
+      });
+      const data: CandlestickData[] = displayCandles.map(candle => ({
+        time: candle.time as never,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+      }));
+      series.setData(data);
     }
 
-    // Volume Histogram Series
     const volumeSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
       priceScaleId: '',
     });
 
     volumeSeries.priceScale().applyOptions({
-      scaleMargins: {
-        top: 0.8,
-        bottom: 0,
-      },
+      scaleMargins: { top: 0.8, bottom: 0 },
     });
 
-    const volumeData: HistogramData[] = candles.map(c => ({
-      time: c.time as any,
-      value: c.volume,
-      color: c.close >= c.open 
+    const volumeData: HistogramData[] = normalizedCandles.map(candle => ({
+      time: candle.time as never,
+      value: candle.volume,
+      color: candle.close >= candle.open
         ? (isTerminal ? 'rgba(0, 255, 0, 0.3)' : 'rgba(16, 185, 129, 0.3)')
         : (isTerminal ? 'rgba(255, 0, 0, 0.3)' : 'rgba(244, 63, 94, 0.3)'),
     }));
-
     volumeSeries.setData(volumeData);
 
-    // Add Overlay Technical Indicators
-    const closes = candles.map(c => c.close);
+    const closes = displayCandles.map(candle => candle.close);
 
-    indicators.forEach(ind => {
-      if (!ind.enabled) return;
+    indicators.forEach(indicator => {
+      if (!indicator.enabled) return;
 
-      if (ind.type === 'SMA') {
-        const smaValues = calculateSMA(closes, ind.period);
-        const lineSeries = chart.addSeries(LineSeries, {
-          color: ind.color,
+      if (indicator.type === 'SMA') {
+        const values = calculateSMA(closes, indicator.period);
+        const series = chart.addSeries(LineSeries, {
+          color: indicator.color,
           lineWidth: 2,
-          title: `SMA ${ind.period}`,
+          title: `SMA ${indicator.period}`,
         });
-        const lineData: LineData[] = candles
-          .map((c, idx) => ({
-            time: c.time as any,
-            value: smaValues[idx] || 0,
-          }))
-          .filter(d => d.value > 0);
-        lineSeries.setData(lineData);
-      } else if (ind.type === 'EMA') {
-        const emaValues = calculateEMA(closes, ind.period);
-        const lineSeries = chart.addSeries(LineSeries, {
-          color: ind.color,
+        const data: LineData[] = displayCandles.flatMap((candle, index) => {
+          const value = values[index];
+          return value === null ? [] : [{ time: candle.time as never, value }];
+        });
+        series.setData(data);
+      } else if (indicator.type === 'EMA') {
+        const values = calculateEMA(closes, indicator.period);
+        const series = chart.addSeries(LineSeries, {
+          color: indicator.color,
           lineWidth: 2,
-          title: `EMA ${ind.period}`,
+          title: `EMA ${indicator.period}`,
         });
-        const lineData: LineData[] = candles
-          .map((c, idx) => ({
-            time: c.time as any,
-            value: emaValues[idx] || 0,
-          }))
-          .filter(d => d.value > 0);
-        lineSeries.setData(lineData);
-      } else if (ind.type === 'VWAP') {
-        const vwapValues = calculateVWAP(candles);
-        const lineSeries = chart.addSeries(LineSeries, {
-          color: ind.color,
+        const data: LineData[] = displayCandles.flatMap((candle, index) => {
+          const value = values[index];
+          return value === null ? [] : [{ time: candle.time as never, value }];
+        });
+        series.setData(data);
+      } else if (indicator.type === 'VWAP') {
+        const values = calculateVWAP(displayCandles);
+        const series = chart.addSeries(LineSeries, {
+          color: indicator.color,
           lineWidth: 2,
           title: 'VWAP',
         });
-        const lineData: LineData[] = candles
-          .map((c, idx) => ({
-            time: c.time as any,
-            value: vwapValues[idx] || 0,
-          }))
-          .filter(d => d.value > 0);
-        lineSeries.setData(lineData);
-      } else if (ind.type === 'BB') {
-        const bb = calculateBollingerBands(closes, ind.period, 2);
-        const upperSeries = chart.addSeries(LineSeries, { color: ind.color, lineWidth: 1, title: 'BB Upper' });
-        const lowerSeries = chart.addSeries(LineSeries, { color: ind.color, lineWidth: 1, title: 'BB Lower' });
-
-        const upperData: LineData[] = candles
-          .map((c, idx) => ({ time: c.time as any, value: bb.upper[idx] || 0 }))
-          .filter(d => d.value > 0);
-        const lowerData: LineData[] = candles
-          .map((c, idx) => ({ time: c.time as any, value: bb.lower[idx] || 0 }))
-          .filter(d => d.value > 0);
-
+        const data: LineData[] = displayCandles.flatMap((candle, index) => {
+          const value = values[index];
+          return value === null ? [] : [{ time: candle.time as never, value }];
+        });
+        series.setData(data);
+      } else if (indicator.type === 'BB') {
+        const bands = calculateBollingerBands(closes, indicator.period, 2);
+        const upperSeries = chart.addSeries(LineSeries, {
+          color: indicator.color,
+          lineWidth: 1,
+          title: 'BB Upper',
+        });
+        const lowerSeries = chart.addSeries(LineSeries, {
+          color: indicator.color,
+          lineWidth: 1,
+          title: 'BB Lower',
+        });
+        const upperData: LineData[] = displayCandles.flatMap((candle, index) => {
+          const value = bands.upper[index];
+          return value === null ? [] : [{ time: candle.time as never, value }];
+        });
+        const lowerData: LineData[] = displayCandles.flatMap((candle, index) => {
+          const value = bands.lower[index];
+          return value === null ? [] : [{ time: candle.time as never, value }];
+        });
         upperSeries.setData(upperData);
         lowerSeries.setData(lowerData);
       }
@@ -193,7 +229,6 @@ export const TradingChart: React.FC = () => {
 
     chart.timeScale().fitContent();
 
-    // Handle Window Resize
     const handleResize = () => {
       if (chartContainerRef.current && chartRef.current) {
         chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
