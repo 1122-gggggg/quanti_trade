@@ -22,5 +22,29 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Run lint
+        run: npm run lint
+
       - name: Verify TypeScript & Build Vite Production Bundle
-        run: npm run build
+        id: production-build
+        shell: bash
+        run: |
+          set +e
+          npm run build > build.log 2>&1
+          exit_code=$?
+          cat build.log
+          echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Upload build diagnostics
+        if: steps.production-build.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: build.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail when production build failed
+        if: steps.production-build.outputs.exit_code != '0'
+        run: exit 1
