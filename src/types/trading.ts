@@ -55,9 +55,9 @@ export interface Order {
   symbol: string;
   side: OrderSide;
   type: OrderType;
-  amount: number; // Quantity of asset
-  price: number; // Order price or execution price
-  total: number; // USD value
+  amount: number;
+  price: number;
+  total: number;
   status: 'pending' | 'executed' | 'cancelled';
   timestamp: number;
   leverage?: number;
@@ -86,10 +86,7 @@ export interface Portfolio {
   initialBalance: number;
   realizedPnL: number;
   positions: Position[];
-  history: {
-    timestamp: number;
-    equity: number;
-  }[];
+  history: { timestamp: number; equity: number }[];
 }
 
 export interface PriceAlert {
@@ -101,11 +98,13 @@ export interface PriceAlert {
   createdAt: number;
 }
 
-export type StrategyName = 
-  | 'SMA_CROSSOVER' 
-  | 'RSI_REVERSAL' 
-  | 'BOLLINGER_BREAKOUT' 
+export type StrategyName =
+  | 'SMA_CROSSOVER'
+  | 'RSI_REVERSAL'
+  | 'BOLLINGER_BREAKOUT'
   | 'MACD_MOMENTUM';
+
+export type IntrabarFillPolicy = 'stop_first' | 'take_profit_first';
 
 export interface StrategyConfig {
   strategy: StrategyName;
@@ -116,6 +115,13 @@ export interface StrategyConfig {
   stopLossPercent: number;
   takeProfitPercent: number;
   initialCapital: number;
+  /** Round-trip modelling inputs. Defaults are deliberately non-zero. */
+  commissionPercent?: number;
+  slippagePercent?: number;
+  positionSizePercent?: number;
+  riskFreeRatePercent?: number;
+  annualizationPeriods?: number;
+  intrabarFillPolicy?: IntrabarFillPolicy;
 }
 
 export interface BacktestTrade {
@@ -128,7 +134,10 @@ export interface BacktestTrade {
   amount: number;
   pnl: number;
   pnlPercent: number;
-  reason: 'Signal' | 'StopLoss' | 'TakeProfit';
+  reason: 'Signal' | 'StopLoss' | 'TakeProfit' | 'EndOfData';
+  grossPnl?: number;
+  fees?: number;
+  barsHeld?: number;
 }
 
 export interface BacktestResult {
@@ -138,10 +147,15 @@ export interface BacktestResult {
   losingTrades: number;
   winRate: number;
   totalReturnPct: number;
+  benchmarkReturnPct: number;
   maxDrawdownPct: number;
   sharpeRatio: number;
+  sortinoRatio: number;
+  calmarRatio: number;
   profitFactor: number;
   finalEquity: number;
+  feesPaid: number;
+  exposurePercent: number;
   trades: BacktestTrade[];
   equityCurve: { time: string; equity: number }[];
 }
