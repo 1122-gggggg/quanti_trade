@@ -1,4 +1,4 @@
-name: CI Build & Audit
+name: CI Build & Platform Audit
 
 on:
   push:
@@ -16,14 +16,28 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Install Dependencies
         run: npm ci
 
-      - name: Run lint
+      - name: Run frontend lint
         run: npm run lint
+
+      - name: Run deterministic platform unit tests
+        run: npm run test:platform
+
+      - name: Validate backend and worker syntax
+        run: npm run check:platform
+
+      - name: Validate Docker Compose graph
+        run: docker compose config
 
       - name: Verify TypeScript & Build Vite Production Bundle
         id: production-build
@@ -48,3 +62,44 @@ jobs:
       - name: Fail when production build failed
         if: steps.production-build.outputs.exit_code != '0'
         run: exit 1
+
+  platform-integration:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Create local environment
+        run: cp .env.example .env
+
+      - name: Start backend platform
+        run: docker compose up -d --build db postgrest redis minio minio-init api worker
+
+      - name: Run end-to-end platform smoke test
+        run: npm run test:integration
+
+      - name: Collect service diagnostics
+        if: always()
+        run: |
+          docker compose ps
+          docker compose logs --no-color db postgrest redis minio api worker > platform-services.log || true
+
+      - name: Upload platform diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-services
+          path: platform-services.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop backend platform
+        if: always()
+        run: docker compose down -v --remove-orphans
