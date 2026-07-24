@@ -1,4 +1,14 @@
-export type AssetCategory = 'crypto' | 'stocks' | 'forex' | 'commodities';
+export type AssetCategory =
+  | 'crypto'
+  | 'stocks'
+  | 'etf'
+  | 'forex'
+  | 'commodities'
+  | 'index'
+  | 'bonds'
+  | 'futures'
+  | 'options'
+  | 'economics';
 
 export interface Asset {
   symbol: string;
@@ -9,6 +19,13 @@ export interface Asset {
   high24h: number;
   low24h: number;
   volume24h: number;
+  exchange?: string;
+  currency?: string;
+  timezone?: string;
+  session?: string;
+  providerSymbol?: string;
+  minTick?: number;
+  lotSize?: number;
   marketCap?: number;
   icon?: string;
   historySparkline?: number[];
@@ -26,7 +43,33 @@ export interface Candle {
   volume: number;
 }
 
-export type ChartType = 'candlestick' | 'line' | 'area' | 'heikinAshi';
+export type Timeframe =
+  | '1s'
+  | '5s'
+  | '15s'
+  | '30s'
+  | '1m'
+  | '3m'
+  | '5m'
+  | '15m'
+  | '30m'
+  | '45m'
+  | '1h'
+  | '2h'
+  | '4h'
+  | '1D'
+  | '1W'
+  | '1M';
+
+export type ChartType =
+  | 'candlestick'
+  | 'hollowCandles'
+  | 'bar'
+  | 'line'
+  | 'area'
+  | 'baseline'
+  | 'heikinAshi';
+
 export type DrawingTool = 'cursor' | 'trendline' | 'horizontalLine' | 'fibonacci' | 'ruler';
 
 export interface DrawingElement {
