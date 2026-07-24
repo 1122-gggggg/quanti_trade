@@ -247,7 +247,7 @@ export function runBacktest(
   };
 }
 
-function emptyResult(config: StrategyConfig, candles: Candle[], symbol: string): BacktestResult {
+function emptyResult(config: StrategyConfig, candles: Candle[], _symbol: string): BacktestResult {
   const initialCapital = Math.max(0, config.initialCapital);
   return {
     strategyName: config.strategy.replaceAll('_', ' '),
