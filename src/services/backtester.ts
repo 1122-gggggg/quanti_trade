@@ -1,198 +1,271 @@
-import type { Candle, StrategyConfig, BacktestResult, BacktestTrade } from '../types/trading';
-import { calculateSMA, calculateRSI, calculateBollingerBands } from './technicalIndicators';
+import type { BacktestResult, BacktestTrade, Candle, StrategyConfig } from '../types/trading';
+import { calculateBollingerBands, calculateRSI, calculateSMA } from './technicalIndicators';
+
+interface OpenPosition {
+  entryPrice: number;
+  entryTime: string;
+  entryIndex: number;
+  quantity: number;
+  entryFee: number;
+  stopPrice: number | null;
+  takeProfitPrice: number | null;
+}
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const round = (value: number, digits = 2) => Number(value.toFixed(digits));
+
+function formatTime(timestamp: number): string {
+  return new Date(timestamp * 1000).toISOString();
+}
+
+function validateCandles(candles: Candle[]): Candle[] {
+  return candles
+    .filter(c => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high)
+      && Number.isFinite(c.low) && Number.isFinite(c.close) && Number.isFinite(c.volume)
+      && c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0
+      && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close))
+    .sort((a, b) => a.time - b.time)
+    .filter((candle, index, sorted) => index === 0 || candle.time > sorted[index - 1].time);
+}
+
+function standardDeviation(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
 
 export function runBacktest(
-  candles: Candle[],
+  rawCandles: Candle[],
   config: StrategyConfig,
-  symbol: string
+  symbol: string,
 ): BacktestResult {
-  const closes = candles.map(c => c.close);
-  const fastMA = calculateSMA(closes, config.fastPeriod);
-  const slowMA = calculateSMA(closes, config.slowPeriod);
-  const rsi = calculateRSI(candles, 14);
-  const bb = calculateBollingerBands(closes, 20, 2);
-
-  let cash = config.initialCapital;
-  let holdings = 0;
-  let entryPrice = 0;
-  let entryTime = '';
-  
-  const trades: BacktestTrade[] = [];
-  const equityCurve: { time: string; equity: number }[] = [];
-  
-  let maxEquity = config.initialCapital;
-  let maxDrawdownPct = 0;
-
-  for (let i = 0; i < candles.length; i++) {
-    const candle = candles[i];
-    const dateStr = new Date(candle.time * 1000).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-    });
-
-    const currentPrice = candle.close;
-    
-    // Check existing position for Stop-loss / Take-profit
-    if (holdings > 0) {
-      const pnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
-      
-      let exitReason: 'Signal' | 'StopLoss' | 'TakeProfit' | null = null;
-      if (config.stopLossPercent > 0 && pnlPct <= -config.stopLossPercent) {
-        exitReason = 'StopLoss';
-      } else if (config.takeProfitPercent > 0 && pnlPct >= config.takeProfitPercent) {
-        exitReason = 'TakeProfit';
-      }
-
-      if (exitReason) {
-        const proceeds = holdings * currentPrice;
-        const pnl = proceeds - (holdings * entryPrice);
-        cash += proceeds;
-
-        trades.push({
-          entryTime,
-          exitTime: dateStr,
-          symbol,
-          side: 'sell',
-          entryPrice,
-          exitPrice: currentPrice,
-          amount: holdings,
-          pnl: Number(pnl.toFixed(2)),
-          pnlPercent: Number(pnlPct.toFixed(2)),
-          reason: exitReason,
-        });
-
-        holdings = 0;
-      }
-    }
-
-    // Strategy Signal Check
-    let buySignal = false;
-    let sellSignal = false;
-
-    if (i > Math.max(config.fastPeriod, config.slowPeriod)) {
-      if (config.strategy === 'SMA_CROSSOVER') {
-        const prevFast = fastMA[i - 1];
-        const prevSlow = slowMA[i - 1];
-        const currFast = fastMA[i];
-        const currSlow = slowMA[i];
-        
-        if (prevFast !== null && prevSlow !== null && currFast !== null && currSlow !== null) {
-          if (prevFast <= prevSlow && currFast > currSlow) buySignal = true;
-          if (prevFast >= prevSlow && currFast < currSlow) sellSignal = true;
-        }
-      } else if (config.strategy === 'RSI_REVERSAL') {
-        const currRSI = rsi[i];
-        if (currRSI !== null) {
-          if (currRSI < config.rsiThresholdLow) buySignal = true;
-          if (currRSI > config.rsiThresholdHigh) sellSignal = true;
-        }
-      } else if (config.strategy === 'BOLLINGER_BREAKOUT') {
-        const lower = bb.lower[i];
-        const upper = bb.upper[i];
-        if (lower !== null && upper !== null) {
-          if (currentPrice <= lower) buySignal = true;
-          if (currentPrice >= upper) sellSignal = true;
-        }
-      }
-    }
-
-    // Execute Buy
-    if (buySignal && holdings === 0 && cash > 0) {
-      entryPrice = currentPrice;
-      entryTime = dateStr;
-      holdings = cash / currentPrice;
-      cash = 0;
-    } 
-    // Execute Sell (Signal based)
-    else if (sellSignal && holdings > 0) {
-      const proceeds = holdings * currentPrice;
-      const pnl = proceeds - (holdings * entryPrice);
-      const pnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
-      cash += proceeds;
-
-      trades.push({
-        entryTime,
-        exitTime: dateStr,
-        symbol,
-        side: 'sell',
-        entryPrice,
-        exitPrice: currentPrice,
-        amount: holdings,
-        pnl: Number(pnl.toFixed(2)),
-        pnlPercent: Number(pnlPct.toFixed(2)),
-        reason: 'Signal',
-      });
-
-      holdings = 0;
-    }
-
-    const currentEquity = cash + (holdings * currentPrice);
-    if (currentEquity > maxEquity) maxEquity = currentEquity;
-    const drawdown = ((maxEquity - currentEquity) / maxEquity) * 100;
-    if (drawdown > maxDrawdownPct) maxDrawdownPct = drawdown;
-
-    equityCurve.push({
-      time: dateStr,
-      equity: Number(currentEquity.toFixed(2)),
-    });
+  const candles = validateCandles(rawCandles);
+  if (candles.length < 3 || config.initialCapital <= 0) {
+    return emptyResult(config, candles, symbol);
   }
 
-  // Force close remaining open position at backtest end
-  if (holdings > 0) {
-    const lastCandle = candles[candles.length - 1];
-    const lastPrice = lastCandle.close;
-    const dateStr = new Date(lastCandle.time * 1000).toLocaleDateString();
-    const proceeds = holdings * lastPrice;
-    const pnl = proceeds - (holdings * entryPrice);
-    const pnlPct = ((lastPrice - entryPrice) / entryPrice) * 100;
-    cash += proceeds;
+  const commissionRate = Math.max(0, config.commissionPercent ?? 0.1) / 100;
+  const slippageRate = Math.max(0, config.slippagePercent ?? 0.05) / 100;
+  const positionSize = clamp(config.positionSizePercent ?? 100, 0, 100) / 100;
+  const annualizationPeriods = Math.max(1, config.annualizationPeriods ?? 252);
+  const riskFreePerPeriod = ((config.riskFreeRatePercent ?? 0) / 100) / annualizationPeriods;
+  const fillPolicy = config.intrabarFillPolicy ?? 'stop_first';
 
+  const closes = candles.map(candle => candle.close);
+  const fastMA = calculateSMA(closes, Math.max(1, config.fastPeriod));
+  const slowMA = calculateSMA(closes, Math.max(2, config.slowPeriod));
+  const rsi = calculateRSI(candles, 14);
+  const bands = calculateBollingerBands(closes, 20, 2);
+
+  let cash = config.initialCapital;
+  let position: OpenPosition | null = null;
+  let pendingAction: 'buy' | 'sell' | null = null;
+  let maxEquity = config.initialCapital;
+  let maxDrawdownPct = 0;
+  let totalFees = 0;
+  let investedBars = 0;
+
+  const trades: BacktestTrade[] = [];
+  const equityCurve: { time: string; equity: number }[] = [];
+  const periodReturns: number[] = [];
+  let previousEquity = config.initialCapital;
+
+  const closePosition = (
+    candle: Candle,
+    rawExitPrice: number,
+    reason: BacktestTrade['reason'],
+    index: number,
+  ) => {
+    if (!position) return;
+
+    const exitPrice = rawExitPrice * (1 - slippageRate);
+    const grossProceeds = position.quantity * exitPrice;
+    const exitFee = grossProceeds * commissionRate;
+    const grossPnl = position.quantity * (exitPrice - position.entryPrice);
+    const netPnl = grossPnl - position.entryFee - exitFee;
+    const investedCapital = (position.quantity * position.entryPrice) + position.entryFee;
+
+    cash += grossProceeds - exitFee;
+    totalFees += exitFee;
     trades.push({
-      entryTime,
-      exitTime: dateStr,
+      entryTime: position.entryTime,
+      exitTime: formatTime(candle.time),
       symbol,
       side: 'sell',
-      entryPrice,
-      exitPrice: lastPrice,
-      amount: holdings,
-      pnl: Number(pnl.toFixed(2)),
-      pnlPercent: Number(pnlPct.toFixed(2)),
-      reason: 'Signal',
+      entryPrice: round(position.entryPrice, 6),
+      exitPrice: round(exitPrice, 6),
+      amount: round(position.quantity, 8),
+      grossPnl: round(grossPnl),
+      fees: round(position.entryFee + exitFee),
+      pnl: round(netPnl),
+      pnlPercent: round(investedCapital > 0 ? (netPnl / investedCapital) * 100 : 0),
+      barsHeld: Math.max(1, index - position.entryIndex),
+      reason,
     });
+    position = null;
+  };
+
+  for (let index = 0; index < candles.length; index += 1) {
+    const candle = candles[index];
+
+    // Signals generated on the previous close are filled at this bar's open.
+    if (pendingAction === 'sell' && position) {
+      closePosition(candle, candle.open, 'Signal', index);
+    } else if (pendingAction === 'buy' && !position && cash > 0 && positionSize > 0) {
+      const entryPrice = candle.open * (1 + slippageRate);
+      const budget = cash * positionSize;
+      const quantity = budget / (entryPrice * (1 + commissionRate));
+      const notional = quantity * entryPrice;
+      const entryFee = notional * commissionRate;
+
+      if (quantity > 0 && notional + entryFee <= cash) {
+        cash -= notional + entryFee;
+        totalFees += entryFee;
+        position = {
+          entryPrice,
+          entryTime: formatTime(candle.time),
+          entryIndex: index,
+          quantity,
+          entryFee,
+          stopPrice: config.stopLossPercent > 0
+            ? entryPrice * (1 - config.stopLossPercent / 100)
+            : null,
+          takeProfitPrice: config.takeProfitPercent > 0
+            ? entryPrice * (1 + config.takeProfitPercent / 100)
+            : null,
+        };
+      }
+    }
+    pendingAction = null;
+
+    // OHLC-aware exits. When both levels occur in one candle, use an explicit policy.
+    if (position) {
+      investedBars += 1;
+      const stopHit = position.stopPrice !== null && candle.low <= position.stopPrice;
+      const takeProfitHit = position.takeProfitPrice !== null && candle.high >= position.takeProfitPrice;
+
+      if (stopHit && takeProfitHit) {
+        if (fillPolicy === 'take_profit_first') {
+          closePosition(candle, position.takeProfitPrice!, 'TakeProfit', index);
+        } else {
+          closePosition(candle, position.stopPrice!, 'StopLoss', index);
+        }
+      } else if (stopHit) {
+        closePosition(candle, position.stopPrice!, 'StopLoss', index);
+      } else if (takeProfitHit) {
+        closePosition(candle, position.takeProfitPrice!, 'TakeProfit', index);
+      }
+    }
+
+    const equity = cash + (position ? position.quantity * candle.close : 0);
+    maxEquity = Math.max(maxEquity, equity);
+    maxDrawdownPct = Math.max(maxDrawdownPct, maxEquity > 0 ? ((maxEquity - equity) / maxEquity) * 100 : 0);
+    equityCurve.push({ time: formatTime(candle.time), equity: round(equity) });
+
+    if (previousEquity > 0) periodReturns.push((equity / previousEquity) - 1);
+    previousEquity = equity;
+
+    if (index >= candles.length - 1) continue;
+
+    let buySignal = false;
+    let sellSignal = false;
+    if (index > Math.max(config.fastPeriod, config.slowPeriod)) {
+      if (config.strategy === 'SMA_CROSSOVER') {
+        const previousFast = fastMA[index - 1];
+        const previousSlow = slowMA[index - 1];
+        const currentFast = fastMA[index];
+        const currentSlow = slowMA[index];
+        if (previousFast !== null && previousSlow !== null && currentFast !== null && currentSlow !== null) {
+          buySignal = previousFast <= previousSlow && currentFast > currentSlow;
+          sellSignal = previousFast >= previousSlow && currentFast < currentSlow;
+        }
+      } else if (config.strategy === 'RSI_REVERSAL') {
+        const currentRsi = rsi[index];
+        buySignal = currentRsi !== null && currentRsi < config.rsiThresholdLow;
+        sellSignal = currentRsi !== null && currentRsi > config.rsiThresholdHigh;
+      } else if (config.strategy === 'BOLLINGER_BREAKOUT') {
+        const lower = bands.lower[index];
+        const upper = bands.upper[index];
+        buySignal = lower !== null && candle.close <= lower;
+        sellSignal = upper !== null && candle.close >= upper;
+      }
+    }
+
+    if (position && sellSignal) pendingAction = 'sell';
+    if (!position && buySignal) pendingAction = 'buy';
+  }
+
+  if (position) {
+    const lastIndex = candles.length - 1;
+    const lastCandle = candles[lastIndex];
+    closePosition(lastCandle, lastCandle.close, 'EndOfData', lastIndex);
+    equityCurve[lastIndex] = { time: formatTime(lastCandle.time), equity: round(cash) };
   }
 
   const finalEquity = cash;
-  const totalReturnPct = ((finalEquity - config.initialCapital) / config.initialCapital) * 100;
-  
-  const winningTrades = trades.filter(t => t.pnl > 0).length;
-  const losingTrades = trades.filter(t => t.pnl <= 0).length;
-  const totalTrades = trades.length;
-  const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
-
-  const totalWinsPnL = trades.filter(t => t.pnl > 0).reduce((sum, t) => sum + t.pnl, 0);
-  const totalLossesPnL = Math.abs(trades.filter(t => t.pnl <= 0).reduce((sum, t) => sum + t.pnl, 0));
-  const profitFactor = totalLossesPnL > 0 ? totalWinsPnL / totalLossesPnL : totalWinsPnL > 0 ? 99 : 0;
-
-  // Simple Sharpe Ratio estimation
-  const returns = trades.map(t => t.pnlPercent);
-  const avgReturn = returns.length ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
-  const variance = returns.length ? returns.reduce((a, b) => a + Math.pow(b - avgReturn, 2), 0) / returns.length : 0;
-  const stdDev = Math.sqrt(variance);
-  const sharpeRatio = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(12) : 0;
+  const totalReturnPct = ((finalEquity / config.initialCapital) - 1) * 100;
+  const benchmarkReturnPct = ((candles[candles.length - 1].close / candles[0].open) - 1) * 100;
+  const winningTrades = trades.filter(trade => trade.pnl > 0).length;
+  const losingTrades = trades.length - winningTrades;
+  const grossProfit = trades.filter(trade => trade.pnl > 0).reduce((sum, trade) => sum + trade.pnl, 0);
+  const grossLoss = Math.abs(trades.filter(trade => trade.pnl < 0).reduce((sum, trade) => sum + trade.pnl, 0));
+  const excessReturns = periodReturns.map(value => value - riskFreePerPeriod);
+  const downsideReturns = excessReturns.filter(value => value < 0);
+  const meanExcess = excessReturns.length > 0
+    ? excessReturns.reduce((sum, value) => sum + value, 0) / excessReturns.length
+    : 0;
+  const sharpeRatio = standardDeviation(excessReturns) > 0
+    ? (meanExcess / standardDeviation(excessReturns)) * Math.sqrt(annualizationPeriods)
+    : 0;
+  const downsideDeviation = standardDeviation(downsideReturns);
+  const sortinoRatio = downsideDeviation > 0
+    ? (meanExcess / downsideDeviation) * Math.sqrt(annualizationPeriods)
+    : 0;
+  const years = Math.max(1 / annualizationPeriods, (candles.length - 1) / annualizationPeriods);
+  const cagr = finalEquity > 0 ? ((finalEquity / config.initialCapital) ** (1 / years)) - 1 : -1;
+  const calmarRatio = maxDrawdownPct > 0 ? cagr / (maxDrawdownPct / 100) : 0;
 
   return {
-    strategyName: config.strategy.replace('_', ' '),
-    totalTrades,
+    strategyName: config.strategy.replaceAll('_', ' '),
+    totalTrades: trades.length,
     winningTrades,
     losingTrades,
-    winRate: Number(winRate.toFixed(1)),
-    totalReturnPct: Number(totalReturnPct.toFixed(2)),
-    maxDrawdownPct: Number(maxDrawdownPct.toFixed(2)),
-    sharpeRatio: Number(sharpeRatio.toFixed(2)),
-    profitFactor: Number(profitFactor.toFixed(2)),
-    finalEquity: Number(finalEquity.toFixed(2)),
+    winRate: round(trades.length > 0 ? (winningTrades / trades.length) * 100 : 0, 1),
+    totalReturnPct: round(totalReturnPct),
+    benchmarkReturnPct: round(benchmarkReturnPct),
+    maxDrawdownPct: round(maxDrawdownPct),
+    sharpeRatio: round(sharpeRatio),
+    sortinoRatio: round(sortinoRatio),
+    calmarRatio: round(calmarRatio),
+    profitFactor: round(grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Number.POSITIVE_INFINITY : 0),
+    finalEquity: round(finalEquity),
+    feesPaid: round(totalFees),
+    exposurePercent: round((investedBars / candles.length) * 100),
     trades,
     equityCurve,
+  };
+}
+
+function emptyResult(config: StrategyConfig, candles: Candle[], _symbol: string): BacktestResult {
+  const initialCapital = Math.max(0, config.initialCapital);
+  return {
+    strategyName: config.strategy.replaceAll('_', ' '),
+    totalTrades: 0,
+    winningTrades: 0,
+    losingTrades: 0,
+    winRate: 0,
+    totalReturnPct: 0,
+    benchmarkReturnPct: candles.length > 1 ? round(((candles.at(-1)!.close / candles[0].open) - 1) * 100) : 0,
+    maxDrawdownPct: 0,
+    sharpeRatio: 0,
+    sortinoRatio: 0,
+    calmarRatio: 0,
+    profitFactor: 0,
+    finalEquity: initialCapital,
+    feesPaid: 0,
+    exposurePercent: 0,
+    trades: [],
+    equityCurve: candles.map(candle => ({ time: formatTime(candle.time), equity: initialCapital })),
   };
 }

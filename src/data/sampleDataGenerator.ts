@@ -1,98 +1,96 @@
-import type { Candle } from '../types/trading';
+import type { Candle, Timeframe } from '../types/trading';
+import { alignTimestampToTimeframe, timeframeToSeconds } from '../services/timeframes';
 
 /**
- * Generates realistic OHLC historical candlestick data using a Geometric Brownian Motion model.
+ * Generates realistic OHLC historical candlestick data using a Geometric
+ * Brownian Motion model. This is a demo feed only and must not be presented as
+ * exchange-sourced market history.
  */
 export function generateHistoricalCandles(
   basePrice: number,
   count: number = 200,
-  timeframe: '1m' | '5m' | '15m' | '1h' | '4h' | '1D' = '1h'
+  timeframe: Timeframe = '1h'
 ): Candle[] {
   const candles: Candle[] = [];
-  
-  // Time step in seconds per candle
-  const timeframeSecondsMap: Record<string, number> = {
-    '1m': 60,
-    '5m': 300,
-    '15m': 900,
-    '1h': 3600,
-    '4h': 14400,
-    '1D': 86400,
-  };
-  
-  const stepSeconds = timeframeSecondsMap[timeframe] || 3600;
+  const stepSeconds = timeframeToSeconds(timeframe);
   const now = Math.floor(Date.now() / 1000);
-  const startTime = now - count * stepSeconds;
+  const currentBucket = alignTimestampToTimeframe(now, timeframe);
+  const startTime = currentBucket - (count - 1) * stepSeconds;
 
-  let currentPrice = basePrice * (0.85 + Math.random() * 0.15); // Start slightly below current price
-  
+  let currentPrice = basePrice * (0.85 + Math.random() * 0.15);
+
   for (let i = 0; i < count; i++) {
     const candleTime = startTime + i * stepSeconds;
-    
-    // Daily volatility % based on asset price level
-    const volatility = basePrice > 10000 ? 0.008 : basePrice > 100 ? 0.012 : 0.005;
-    const trendBias = (Math.sin(i / 15) * 0.003) + 0.0005; // Gentle wave trend
-    
+    const intervalScale = Math.sqrt(stepSeconds / 86_400);
+    const dailyVolatility = basePrice > 10_000 ? 0.04 : basePrice > 100 ? 0.025 : 0.015;
+    const volatility = Math.max(0.0002, dailyVolatility * intervalScale);
+    const trendBias = Math.sin(i / 15) * volatility * 0.15;
+
     const open = currentPrice;
     const priceChange = open * (trendBias + (Math.random() - 0.49) * volatility * 2);
-    const close = Math.max(0.01, open + priceChange);
-    
-    const highMargin = Math.random() * volatility * open * 1.5;
-    const lowMargin = Math.random() * volatility * open * 1.5;
-    
+    const close = Math.max(0.000001, open + priceChange);
+    const highMargin = Math.random() * volatility * open;
+    const lowMargin = Math.random() * volatility * open;
     const high = Math.max(open, close) + highMargin;
-    const low = Math.min(open, close) - lowMargin;
-    
-    const volume = Math.floor((open * 1000) * (0.8 + Math.random() * 0.8));
+    const low = Math.max(0.000001, Math.min(open, close) - lowMargin);
+    const volume = Math.floor((open * 1_000) * (0.8 + Math.random() * 0.8));
 
     candles.push({
       time: candleTime,
-      open: Number(open.toFixed(2)),
-      high: Number(high.toFixed(2)),
-      low: Number(low.toFixed(2)),
-      close: Number(close.toFixed(2)),
+      open: Number(open.toFixed(6)),
+      high: Number(high.toFixed(6)),
+      low: Number(low.toFixed(6)),
+      close: Number(close.toFixed(6)),
       volume,
     });
 
     currentPrice = close;
   }
 
-  // Ensure last candle close is close to current basePrice
   if (candles.length > 0) {
-    candles[candles.length - 1].close = basePrice;
+    const last = candles[candles.length - 1];
+    last.close = basePrice;
+    last.high = Math.max(last.high, basePrice);
+    last.low = Math.min(last.low, basePrice);
   }
 
   return candles;
 }
 
 /**
- * Generate a next real-time tick/candle update for live market simulation
+ * Update the active candle or create a new candle when the next timeframe
+ * bucket begins.
  */
-export function generateNextTick(lastCandle: Candle, timeframeSeconds: number = 3600): Candle {
-  const isNewCandle = Math.floor(Date.now() / 1000) - lastCandle.time >= timeframeSeconds;
-  const volatility = 0.002;
+export function generateNextTick(
+  lastCandle: Candle,
+  timeframe: Timeframe = '1h'
+): Candle {
+  const now = Math.floor(Date.now() / 1000);
+  const bucketTime = alignTimestampToTimeframe(now, timeframe);
+  const intervalScale = Math.sqrt(timeframeToSeconds(timeframe) / 86_400);
+  const volatility = Math.max(0.00005, 0.02 * intervalScale);
   const changePct = (Math.random() - 0.495) * volatility;
-  
-  if (isNewCandle) {
-    const newTime = Math.floor(Date.now() / 1000);
+
+  if (bucketTime > lastCandle.time) {
     const open = lastCandle.close;
-    const close = open * (1 + changePct);
+    const close = Math.max(0.000001, open * (1 + changePct));
+
     return {
-      time: newTime,
-      open: Number(open.toFixed(2)),
-      high: Number(Math.max(open, close).toFixed(2)),
-      low: Number(Math.min(open, close).toFixed(2)),
-      close: Number(close.toFixed(2)),
-      volume: Math.floor(open * 50),
-    };
-  } else {
-    const newClose = Number((lastCandle.close * (1 + changePct)).toFixed(2));
-    return {
-      ...lastCandle,
-      high: Math.max(lastCandle.high, newClose),
-      low: Math.min(lastCandle.low, newClose),
-      close: newClose,
-      volume: lastCandle.volume + Math.floor(Math.random() * 20),
+      time: bucketTime,
+      open: Number(open.toFixed(6)),
+      high: Number(Math.max(open, close).toFixed(6)),
+      low: Number(Math.min(open, close).toFixed(6)),
+      close: Number(close.toFixed(6)),
+      volume: Math.max(1, Math.floor(open * 50)),
     };
   }
+
+  const newClose = Math.max(0.000001, lastCandle.close * (1 + changePct));
+  return {
+    ...lastCandle,
+    high: Math.max(lastCandle.high, newClose),
+    low: Math.min(lastCandle.low, newClose),
+    close: Number(newClose.toFixed(6)),
+    volume: lastCandle.volume + Math.floor(Math.random() * 20),
+  };
 }

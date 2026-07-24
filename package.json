@@ -7,7 +7,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "platform:api": "node apps/api/src/server.mjs",
+    "platform:worker": "node apps/worker/src/worker.mjs",
+    "test:platform": "node --test test/platform.test.mjs",
+    "test:integration": "node test/integration-smoke.mjs",
+    "check:platform": "node --check packages/platform/src/core.mjs && node --check packages/platform/src/postgrest.mjs && node --check packages/platform/src/redis.mjs && node --check packages/platform/src/s3.mjs && node --check packages/platform/src/providers.mjs && node --check apps/api/src/server.mjs && node --check apps/worker/src/worker.mjs && python3 -m py_compile apps/worker/src/parquet_to_json.py"
   },
   "dependencies": {
     "@types/canvas-confetti": "^1.9.0",
