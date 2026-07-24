@@ -1,0 +1,38 @@
+name: Apply Epic 2 Bundle
+
+on:
+  push:
+    branches: [agent/epic-2-backend-data-platform]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/epic-2-backend-data-platform
+          fetch-depth: 0
+
+      - name: Verify and apply bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d tools/epic2.bundle.b64 > /tmp/epic2.tgz
+          echo "e0e09ad0f392266a0d1f1d758a8d67b2d4d69d076df29b31045928a1c87b3537  /tmp/epic2.tgz" | sha256sum -c -
+          tar -xzf /tmp/epic2.tgz
+          rm -f tools/epic2.bundle.b64 .github/workflows/epic2-bootstrap.yml
+          rmdir tools 2>/dev/null || true
+
+      - name: Commit platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: complete Epic 2 backend data platform"
+          git push origin HEAD:agent/epic-2-backend-data-platform
